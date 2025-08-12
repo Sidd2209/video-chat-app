@@ -25,4 +25,4 @@ class Config:
     
     # Server settings
     HOST = os.environ.get('HOST') or '0.0.0.0'
-    PORT = int(os.environ.get('PORT') or 5001)
+    PORT = int(os.environ.get('PORT') or 8081)

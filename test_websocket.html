@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebSocket Test</title>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+</head>
+<body>
+    <h1>WebSocket Connection Test</h1>
+    <div id="status">Connecting...</div>
+    <div id="messages"></div>
+
+    <script>
+        const socket = io('http://localhost:8081');
+        
+        socket.on('connect', () => {
+            document.getElementById('status').innerHTML = 'Connected!';
+            document.getElementById('status').style.color = 'green';
+            console.log('Connected to server');
+        });
+        
+        socket.on('user_id', (data) => {
+            document.getElementById('messages').innerHTML += '<p>Received user_id: ' + data.user_id + '</p>';
+            console.log('Received user_id:', data.user_id);
+        });
+        
+        socket.on('disconnect', () => {
+            document.getElementById('status').innerHTML = 'Disconnected';
+            document.getElementById('status').style.color = 'red';
+            console.log('Disconnected from server');
+        });
+        
+        socket.on('connect_error', (error) => {
+            document.getElementById('status').innerHTML = 'Connection Error: ' + error.message;
+            document.getElementById('status').style.color = 'red';
+            console.error('Connection error:', error);
+        });
+    </script>
+</body>
+</html>
