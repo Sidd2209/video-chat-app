@@ -75,6 +75,11 @@ class UserManager:
         """Remove user from connected users"""
         with self.lock:
             self.connected_users.discard(user_id)
+            # Remove from waiting rooms
+            for chat_type in ['video', 'text']:
+                if user_id in self.waiting_rooms[chat_type]:
+                    self.waiting_rooms[chat_type].remove(user_id)
+                    logger.info(f"Removed {user_id} from {chat_type} waiting room")
             logger.info(f"User {user_id} removed from connected users")
     
     def create_session(self, user1_id, user2_id, chat_type):
@@ -111,11 +116,6 @@ class UserManager:
                 self.user_sessions.pop(session.user2_id, None)
                 logger.info(f"Removed session {session_id}")
             return session
-    
-    def add_connected_user(self, user_id):
-        """Add user to connected users set"""
-        with self.lock:
-            self.connected_users.add(user_id)
     
     def remove_connected_user(self, user_id):
         """Remove user from connected users set"""
@@ -464,6 +464,16 @@ def handle_connect():
     
     logger.info(f"Client connected: {user_id} (socket: {request.sid})")
 
+@socketio.on('request_user_id')
+def handle_request_user_id():
+    """Handle user_id request from client"""
+    user_id = user_manager.socket_user_map.get(request.sid)
+    if user_id:
+        logger.info(f"Re-sending user_id {user_id} to client {request.sid}")
+        emit('user_id', {'user_id': user_id})
+    else:
+        logger.warning(f"Client {request.sid} requested user_id but not found in mapping")
+
 @socketio.on('disconnect')
 def handle_disconnect():
     """Handle client disconnection"""
@@ -552,4 +562,4 @@ def handle_user_typing(data):
 
 if __name__ == '__main__':
     logger.info("Starting Video Chat Backend...")
-    socketio.run(app, host='0.0.0.0', port=5001, debug=True)
+    socketio.run(app, host='0.0.0.0', port=8081, debug=True)
