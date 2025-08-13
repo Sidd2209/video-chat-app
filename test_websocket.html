@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket Test</title>
+    <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
+</head>
+<body>
+    <h1>WebSocket Test</h1>
+    <div id="status">Connecting...</div>
+    <div id="user-id"></div>
+    <div id="logs"></div>
+
+    <script>
+        const statusDiv = document.getElementById('status');
+        const userIdDiv = document.getElementById('user-id');
+        const logsDiv = document.getElementById('logs');
+
+        function log(message) {
+            logsDiv.innerHTML += `<div>${new Date().toLocaleTimeString()}: ${message}</div>`;
+        }
+
+        log('Starting WebSocket test...');
+
+        const socket = io('http://localhost:8081', {
+            transports: ['websocket', 'polling'],
+            timeout: 5000
+        });
+
+        socket.on('connect', () => {
+            log('✅ Connected to WebSocket server');
+            statusDiv.textContent = 'Connected';
+            statusDiv.style.color = 'green';
+        });
+
+        socket.on('user_id', (data) => {
+            log(`🆔 Received user_id: ${JSON.stringify(data)}`);
+            userIdDiv.textContent = `User ID: ${data.user_id}`;
+            userIdDiv.style.color = 'blue';
+        });
+
+        socket.on('connect_error', (error) => {
+            log(`❌ Connection error: ${error.message}`);
+            statusDiv.textContent = 'Connection failed';
+            statusDiv.style.color = 'red';
+        });
+
+        socket.on('disconnect', () => {
+            log('🔌 Disconnected from WebSocket server');
+            statusDiv.textContent = 'Disconnected';
+            statusDiv.style.color = 'orange';
+        });
+
+        // Timeout after 10 seconds
+        setTimeout(() => {
+            if (!userIdDiv.textContent) {
+                log('⏰ Timeout waiting for user_id');
+                statusDiv.textContent = 'Timeout waiting for user_id';
+                statusDiv.style.color = 'red';
+            }
+        }, 10000);
+    </script>
+</body>
+</html>

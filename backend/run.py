@@ -21,7 +21,7 @@ def main():
             host=Config.HOST,
             port=Config.PORT,
             debug=Config.DEBUG,
-            use_reloader=Config.DEBUG
+            use_reloader=False  # Disable auto-reload to prevent restarts
         )
     except KeyboardInterrupt:
         print("\n👋 Shutting down gracefully...")

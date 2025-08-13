@@ -65,8 +65,8 @@ npm run dev &
 FRONTEND_PID=$!
 
 echo "✅ Application started successfully!"
-echo "📡 Backend running on: http://localhost:5000"
-echo "🎨 Frontend running on: http://localhost:5173"
+echo "📡 Backend running on: http://localhost:8081"
+echo "🎨 Frontend running on: http://localhost:8080"
 echo ""
 echo "Press Ctrl+C to stop both servers"
 
