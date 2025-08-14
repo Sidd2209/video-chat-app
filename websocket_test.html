@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket Test</title>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .log {
+            background-color: #f5f5f5;
+            border: 1px solid #ddd;
+            padding: 10px;
+            height: 400px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+        }
+        .connected {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .disconnected {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        .error {
+            background-color: #fff3cd;
+            color: #856404;
+        }
+    </style>
+</head>
+<body>
+    <h1>WebSocket Connection Test</h1>
+    
+    <div id="status" class="status disconnected">Disconnected</div>
+    
+    <button onclick="connect()">Connect</button>
+    <button onclick="disconnect()">Disconnect</button>
+    <button onclick="clearLog()">Clear Log</button>
+    
+    <h3>Connection Log:</h3>
+    <div id="log" class="log"></div>
+
+    <script>
+        let socket = null;
+        let userId = null;
+
+        function log(message) {
+            const logDiv = document.getElementById('log');
+            const timestamp = new Date().toLocaleTimeString();
+            logDiv.innerHTML += `[${timestamp}] ${message}\n`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        function updateStatus(message, className) {
+            const statusDiv = document.getElementById('status');
+            statusDiv.textContent = message;
+            statusDiv.className = `status ${className}`;
+        }
+
+        function clearLog() {
+            document.getElementById('log').innerHTML = '';
+        }
+
+        function connect() {
+            log('Attempting to connect to WebSocket server...');
+            
+            socket = io('http://localhost:8081', {
+                transports: ['websocket', 'polling'],
+                autoConnect: false,
+                reconnection: true,
+                reconnectionAttempts: 3,
+                reconnectionDelay: 2000,
+                timeout: 30000,
+                forceNew: true,
+                upgrade: true,
+                rememberUpgrade: true,
+                withCredentials: false
+            });
+
+            socket.on('connect', () => {
+                log('✅ Connected to WebSocket server');
+                updateStatus('Connected', 'connected');
+            });
+
+            socket.on('disconnect', () => {
+                log('❌ Disconnected from WebSocket server');
+                updateStatus('Disconnected', 'disconnected');
+                userId = null;
+            });
+
+            socket.on('connect_error', (error) => {
+                log(`❌ Connection error: ${error.message}`);
+                updateStatus('Connection Error', 'error');
+                console.error('Connection error details:', error);
+            });
+
+            socket.on('connect_timeout', () => {
+                log('❌ Connection timeout');
+                updateStatus('Connection Timeout', 'error');
+            });
+
+            socket.on('user_id', (data) => {
+                userId = data.user_id;
+                log(`✅ Received user_id: ${userId}`);
+            });
+
+            socket.on('matched', (data) => {
+                log(`🎯 Matched event received: ${JSON.stringify(data)}`);
+            });
+
+            socket.on('webrtc_signal', (data) => {
+                log(`📡 WebRTC signal received: ${JSON.stringify(data)}`);
+            });
+
+            socket.on('partner_disconnected', (data) => {
+                log(`👋 Partner disconnected: ${JSON.stringify(data)}`);
+            });
+
+            socket.connect();
+        }
+
+        function disconnect() {
+            if (socket) {
+                log('Disconnecting from WebSocket server...');
+                socket.disconnect();
+                socket = null;
+            }
+        }
+
+        // Auto-connect on page load
+        window.onload = function() {
+            log('Page loaded, auto-connecting...');
+            connect();
+        };
+    </script>
+</body>
+</html>

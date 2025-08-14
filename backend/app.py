@@ -1,11 +1,15 @@
+# CRITICAL: Eventlet monkey patch must be the very first import
+import eventlet
+eventlet.monkey_patch()
+
 from flask import Flask, request, jsonify, session
 from flask_socketio import SocketIO, emit, join_room, leave_room, disconnect
 from flask_cors import CORS
+import os
 import uuid
 import json
 import time
 from datetime import datetime
-import threading
 import logging
 from collections import defaultdict
 
@@ -18,8 +22,21 @@ app.config['SECRET_KEY'] = 'your-secret-key-change-this'
 app.config['CORS_HEADERS'] = 'Content-Type'
 
 # Initialize SocketIO with CORS
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
-CORS(app)
+socketio = SocketIO(
+    app, 
+    cors_allowed_origins=["http://localhost:8080", "http://127.0.0.1:8080", "*"], 
+    async_mode='eventlet',
+    logger=True,
+    engineio_logger=True,
+    ping_timeout=60,
+    ping_interval=25,
+    max_http_buffer_size=1e8,
+    allow_upgrades=True,
+    transports=['websocket', 'polling'],
+    always_connect=True,
+    cookie=None
+)
+CORS(app, origins=["http://localhost:8080", "http://127.0.0.1:8080", "*"])
 
 # Global state management
 class UserManager:
@@ -35,7 +52,7 @@ class UserManager:
         self.user_sessions = {}  # user_id -> session_id
         self.socket_user_map = {}  # socket_id -> user_id
         self.user_rooms = {}  # user_id -> room_id
-        self.lock = threading.Lock()
+        self.lock = eventlet.Lock()
     
     def add_active_user(self, user_id):
         """Add user to active users (online)"""
@@ -117,15 +134,7 @@ class UserManager:
                 logger.info(f"Removed session {session_id}")
             return session
     
-    def remove_connected_user(self, user_id):
-        """Remove user from connected users set"""
-        with self.lock:
-            self.connected_users.discard(user_id)
-            # Remove from waiting rooms
-            for chat_type in ['video', 'text']:
-                if user_id in self.waiting_rooms[chat_type]:
-                    self.waiting_rooms[chat_type].remove(user_id)
-                    logger.info(f"Removed {user_id} from {chat_type} waiting room")
+
     
     def get_waiting_count(self, chat_type):
         """Get number of waiting users"""
@@ -205,8 +214,8 @@ def start_cleanup_thread():
         time.sleep(300)  # Run every 5 minutes
         cleanup_inactive_sessions()
 
-cleanup_thread = threading.Thread(target=start_cleanup_thread, daemon=True)
-cleanup_thread.start()
+# Use eventlet greenthread instead of threading
+eventlet.spawn(start_cleanup_thread)
 
 @app.route('/')
 def health_check():
@@ -229,6 +238,8 @@ def health_check():
             'active_session_ids': list(user_manager.active_sessions.keys())
         }
     })
+
+
 
 @app.route('/start', methods=['POST'])
 def start_text_chat():
@@ -276,7 +287,7 @@ def start_text_chat():
             logger.info(f"User {user_id} waiting for text chat")
             
             return jsonify({
-                'session_id': user_id,
+                'session_id': None,
                 'status': 'waiting'
             })
         
@@ -290,34 +301,47 @@ def start_video_chat():
     try:
         # Get user_id from request headers or query params
         user_id = request.headers.get('X-User-ID') or request.args.get('user_id')
+        logger.info(f"Received video chat request - Headers: {dict(request.headers)}, Args: {dict(request.args)}, user_id: {user_id}")
+        
         if not user_id:
+            logger.error("No user_id provided in request")
             return jsonify({'error': 'User ID required'}), 400
         
         # Verify user is active (connected via WebSocket)
+        logger.info(f"Checking if user {user_id} is in active_users: {user_id in user_manager.active_users}")
+        logger.info(f"Active users: {list(user_manager.active_users)}")
+        
         if user_id not in user_manager.active_users:
+            logger.error(f"User {user_id} not found in active_users")
             return jsonify({'error': 'User not connected via WebSocket'}), 400
         
         # Check if there's a waiting user
         partner_id = user_manager.get_waiting_partner('video')
+        logger.info(f"Video chat request from {user_id}, waiting users: {user_manager.waiting_rooms['video']}, partner_id: {partner_id}")
         
         if partner_id:
             # Match with waiting user
+            logger.info(f"Creating session between {user_id} and {partner_id}")
             chat_session = user_manager.create_session(user_id, partner_id, 'video')
             
             # Notify both users
+            logger.info(f"Emitting matched event to {user_id}")
             socketio.emit('matched', {
                 'session_id': chat_session.session_id,
                 'chat_type': 'video',
-                'partner_id': partner_id
+                'partner_id': partner_id,
+                'is_initiator': False  # The user who just joined is not the initiator
             }, room=user_id)
             
+            logger.info(f"Emitting matched event to {partner_id}")
             socketio.emit('matched', {
                 'session_id': chat_session.session_id,
                 'chat_type': 'video',
-                'partner_id': user_id
+                'partner_id': user_id,
+                'is_initiator': True  # The user who was waiting is the initiator
             }, room=partner_id)
             
-            logger.info(f"Video chat matched: {user_id} with {partner_id}")
+            logger.info(f"Video chat matched: {user_id} with {partner_id}, session: {chat_session.session_id}")
             
             return jsonify({
                 'session_id': chat_session.session_id,
@@ -327,10 +351,10 @@ def start_video_chat():
         else:
             # Add to waiting list
             user_manager.add_waiting_user(user_id, 'video')
-            logger.info(f"User {user_id} waiting for video chat")
+            logger.info(f"User {user_id} waiting for video chat. Total waiting: {user_manager.get_waiting_count('video')}")
             
             return jsonify({
-                'session_id': user_id,
+                'session_id': None,
                 'status': 'waiting'
             })
         
@@ -442,27 +466,31 @@ def disconnect_chat():
 @socketio.on('connect')
 def handle_connect():
     """Handle client connection"""
-    user_id = str(uuid.uuid4())
-    session['user_id'] = user_id
-    
-    # Join user's personal room
-    join_room(user_id)
-    
-    # Add to active users (online)
-    user_manager.add_active_user(user_id)
-    
-    # Map socket to user
-    user_manager.socket_user_map[request.sid] = user_id
-    
-    # Emit the user_id to the client immediately
-    logger.info(f"Emitting user_id {user_id} to client {request.sid}")
     try:
-        emit('user_id', {'user_id': user_id})
-        logger.info(f"Successfully emitted user_id to client")
+        user_id = str(uuid.uuid4())
+        session['user_id'] = user_id
+        
+        # Join user's personal room
+        join_room(user_id)
+        
+        # Add to active users (online)
+        user_manager.add_active_user(user_id)
+        
+        # Map socket to user
+        user_manager.socket_user_map[request.sid] = user_id
+        
+        # Emit the user_id to the client immediately
+        logger.info(f"Emitting user_id {user_id} to client {request.sid}")
+        try:
+            emit('user_id', {'user_id': user_id})
+            logger.info(f"Successfully emitted user_id to client")
+        except Exception as e:
+            logger.error(f"Error emitting user_id: {str(e)}")
+        
+        logger.info(f"Client connected: {user_id} (socket: {request.sid})")
     except Exception as e:
-        logger.error(f"Error emitting user_id: {str(e)}")
-    
-    logger.info(f"Client connected: {user_id} (socket: {request.sid})")
+        logger.error(f"Error in handle_connect: {str(e)}")
+        raise
 
 @socketio.on('request_user_id')
 def handle_request_user_id():
@@ -477,32 +505,42 @@ def handle_request_user_id():
 @socketio.on('disconnect')
 def handle_disconnect():
     """Handle client disconnection"""
-    user_id = user_manager.socket_user_map.get(request.sid)
-    if user_id:
-        # Remove from active users
-        user_manager.remove_active_user(user_id)
-        
-        # Remove from connected users if in session
-        user_manager.remove_connected_user(user_id)
-        
-        # Remove socket mapping
-        user_manager.socket_user_map.pop(request.sid, None)
-        
-        # Handle active session disconnection
-        session_id = user_manager.get_user_session(user_id)
-        if session_id:
-            chat_session = user_manager.get_session(session_id)
-            if chat_session:
-                partner_id = chat_session.get_partner_id(user_id)
-                socketio.emit('partner_disconnected', {
-                    'session_id': session_id,
-                    'reason': 'partner_disconnected'
-                }, room=partner_id)
-                
-                # Remove session
-                user_manager.remove_session(session_id)
-        
-        logger.info(f"Client disconnected: {user_id} (socket: {request.sid})")
+    try:
+        user_id = user_manager.socket_user_map.get(request.sid)
+        if user_id:
+            logger.info(f"Client disconnecting: {user_id} (socket: {request.sid})")
+            
+            # Remove from active users
+            user_manager.remove_active_user(user_id)
+            
+            # Remove from connected users if in session
+            user_manager.remove_connected_user(user_id)
+            
+            # Remove socket mapping
+            user_manager.socket_user_map.pop(request.sid, None)
+            
+            # Handle active session disconnection
+            session_id = user_manager.get_user_session(user_id)
+            if session_id:
+                chat_session = user_manager.get_session(session_id)
+                if chat_session:
+                    partner_id = chat_session.get_partner_id(user_id)
+                    try:
+                        socketio.emit('partner_disconnected', {
+                            'session_id': session_id,
+                            'reason': 'partner_disconnected'
+                        }, room=partner_id)
+                    except Exception as e:
+                        logger.error(f"Error emitting partner_disconnected: {str(e)}")
+                    
+                    # Remove session
+                    user_manager.remove_session(session_id)
+            
+            logger.info(f"Client disconnected: {user_id} (socket: {request.sid})")
+        else:
+            logger.warning(f"Disconnect event for unknown socket: {request.sid}")
+    except Exception as e:
+        logger.error(f"Error in handle_disconnect: {str(e)}")
 
 @socketio.on('join_session')
 def handle_join_session(data):
