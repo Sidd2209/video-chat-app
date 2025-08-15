@@ -288,6 +288,29 @@ def force_match():
         logger.error(f"Error in force_match: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/test_emit', methods=['POST'])
+def test_emit():
+    """Test endpoint to verify emit functionality"""
+    try:
+        data = request.get_json()
+        socket_id = data.get('socket_id')
+        test_message = data.get('message', 'test')
+        
+        if socket_id:
+            logger.info(f"Testing emit to socket {socket_id}")
+            try:
+                emit('test_event', {'message': test_message}, room=socket_id)
+                logger.info(f"✅ Test emit successful to {socket_id}")
+                return jsonify({'success': True, 'message': 'Test emit sent'})
+            except Exception as e:
+                logger.error(f"❌ Test emit failed: {str(e)}")
+                return jsonify({'success': False, 'error': str(e)}), 500
+        else:
+            return jsonify({'success': False, 'error': 'No socket_id provided'}), 400
+    except Exception as e:
+        logger.error(f"Error in test_emit: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/auto_match_all', methods=['POST'])
 def auto_match_all():
     """Automatically match all active users who are not in sessions"""
@@ -599,24 +622,44 @@ def handle_connect():
     try:
         # Map early to prevent disconnect warnings
         user_id = str(uuid.uuid4())
+        logger.info(f"Generated user_id: {user_id}")
+        
         session['user_id'] = user_id
+        logger.info(f"Set session user_id")
+        
         user_manager.socket_user_map[request.sid] = user_id  # Map immediately
+        logger.info(f"Mapped socket {request.sid} to user {user_id}")
         
         # Join user's personal room
         join_room(user_id)
+        logger.info(f"Joined room: {user_id}")
         
         # Add to active users (online)
         user_manager.add_active_user(user_id)
+        logger.info(f"Added to active users")
         
         logger.info(f"Client connected: {user_id} (socket: {request.sid})")
         
         # Emit the user_id to the client immediately (auto-send approach)
         logger.info(f"Auto-emitting user_id {user_id} to client {request.sid}")
         try:
-            emit('user_id', {'user_id': user_id}, room=request.sid, namespace='/')
-            logger.info(f"✅ Successfully auto-emitted user_id to client")
+            # Try direct emit first
+            emit('user_id', {'user_id': user_id})
+            logger.info(f"✅ Successfully auto-emitted user_id to client (direct)")
         except Exception as e:
-            logger.error(f"❌ Error auto-emitting user_id: {str(e)}")
+            logger.error(f"❌ Error auto-emitting user_id (direct): {str(e)}")
+            try:
+                # Fallback: emit to room
+                emit('user_id', {'user_id': user_id}, room=request.sid)
+                logger.info(f"✅ Successfully auto-emitted user_id to client (room)")
+            except Exception as e2:
+                logger.error(f"❌ Error auto-emitting user_id (room): {str(e2)}")
+                try:
+                    # Last resort: emit to namespace
+                    emit('user_id', {'user_id': user_id}, namespace='/')
+                    logger.info(f"✅ Successfully auto-emitted user_id to client (namespace)")
+                except Exception as e3:
+                    logger.error(f"❌ Error auto-emitting user_id (namespace): {str(e3)}")
         
         # Auto-match with other waiting users (with delay to ensure user_id is sent first)
         logger.info(f"Starting auto-match for user {user_id}")
@@ -677,6 +720,11 @@ def auto_match_user(new_user_id):
         logger.error(f"❌ Error in auto_match_user: {str(e)}")
         import traceback
         logger.error(f"❌ Traceback: {traceback.format_exc()}")
+
+@socketio.on('*')
+def catch_all(event, data=None):
+    """Catch all events for debugging"""
+    logger.info(f"🔍 Received event: {event}, data: {data}")
 
 @socketio.on('request_user_id')
 def handle_request_user_id():

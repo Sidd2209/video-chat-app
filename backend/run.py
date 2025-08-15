@@ -3,6 +3,10 @@
 Startup script for the Video Chat Backend
 """
 
+# IMPORTANT: Monkey patch eventlet BEFORE importing any other modules
+import eventlet
+eventlet.monkey_patch()
+
 import os
 import sys
 from app import app, socketio
