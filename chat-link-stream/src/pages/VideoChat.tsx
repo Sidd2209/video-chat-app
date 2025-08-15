@@ -23,32 +23,63 @@ const VideoChat = () => {
 
   useEffect(() => {
     document.title = "Video Chat — Chat with a Stranger";
-  }, []);
+    
+    // Set up global matched event listener
+    const handleMatched = (data: any) => {
+      console.log('🌍 Global matched event received:', data);
+      if (userId && !isMatched) {
+        console.log('Processing global matched event for user:', userId);
+        setIsMatched(true);
+        setWaiting(false);
+        setSessionId(data.session_id);
+        toast({ title: "Matched!", description: "You've been connected with a stranger" });
+        if (streamRef.current) {
+          setupRealTimeCommunication(data.session_id, streamRef.current, data.is_initiator);
+        }
+      }
+    };
+    
+    socketService.on('matched', handleMatched);
+    
+    // Also listen for broadcast matched events
+    const handleMatchedBroadcast = (data: any) => {
+      console.log('🌍 Global matched_broadcast event received:', data);
+      if (userId && !isMatched) {
+        // Check if this user is involved in the match
+        if (data.user1_id === userId || data.user2_id === userId) {
+          console.log('Processing broadcast matched event for user:', userId);
+          const isInitiator = data.user1_id === userId; // user1 is the initiator
+          setIsMatched(true);
+          setWaiting(false);
+          setSessionId(data.session_id);
+          toast({ title: "Matched!", description: "You've been connected with a stranger" });
+          if (streamRef.current) {
+            setupRealTimeCommunication(data.session_id, streamRef.current, isInitiator);
+          }
+        }
+      }
+    };
+    
+    socketService.on('matched_broadcast', handleMatchedBroadcast);
+    
+    // Cleanup
+    return () => {
+      socketService.off('matched', handleMatched);
+      socketService.off('matched_broadcast', handleMatchedBroadcast);
+    };
+  }, [userId, isMatched]);
 
   const start = async () => {
     try {
       setConnecting(true);
       
-      // Connect to WebSocket first
-      console.log('Connecting to WebSocket...');
-      await socketService.connect();
-      
-      // Check if we already have a cached user_id
-      const cachedUserId = socketService.getCachedUserId();
-      if (cachedUserId) {
-        console.log('Using cached user_id:', cachedUserId);
-        setUserId(cachedUserId);
-        await setupVideoChat(cachedUserId);
-        return;
-      }
-      
-      // Wait for user_id with timeout
-      console.log('Waiting for user_id...');
+      // Set up user_id listener BEFORE connecting to avoid race condition
+      console.log('Setting up user_id listener before connection...');
       const userId = await new Promise<string>((resolve, reject) => {
         const timeout = setTimeout(() => {
           console.error('Timeout waiting for user_id');
           reject(new Error('Timeout waiting for user_id'));
-        }, 15000); // Increased timeout
+        }, 10000); // Increase to 10 seconds to allow handshake/upgrade
         
         let userIdReceived = false;
         
@@ -62,15 +93,26 @@ const VideoChat = () => {
           resolve(userId);
         };
         
+        // Register listener BEFORE connecting
         socketService.onUserId(handleUserId);
         
-        // Request user_id immediately if socket is connected
-        if (socketService.isSocketConnected) {
-          console.log('Socket is connected, requesting user_id...');
-          socketService.emit('request_user_id');
-        } else {
-          console.log('Socket not connected yet, waiting...');
-        }
+        // Now connect to WebSocket
+        console.log('Connecting to WebSocket...');
+        socketService.connect().then(() => {
+          console.log('WebSocket connected, waiting for user_id...');
+          
+          // Fallback: If user_id is not received within 3 seconds, request it
+          setTimeout(() => {
+            if (!userIdReceived) {
+              console.log('🔄 Fallback: Requesting user_id manually...');
+              console.log('🔍 Socket status before fallback:', socketService.isSocketConnected);
+              socketService.emit('request_user_id', {});
+            }
+          }, 3000);
+        }).catch((error) => {
+          console.error('WebSocket connection failed:', error);
+          reject(error);
+        });
       });
       
       await setupVideoChat(userId);
@@ -117,6 +159,26 @@ const VideoChat = () => {
         setWaiting(true);
         setSessionId(null);
         toast({ title: "Connected", description: "Waiting for a partner..." });
+        
+        // Check if we're already in a session (fallback for missed events)
+        setTimeout(async () => {
+          try {
+            const statusResponse = await fetch('http://localhost:8081');
+            const statusData = await statusResponse.json();
+            const userSession = statusData.debug_info.user_sessions[userId];
+            
+            if (userSession && !isMatched) {
+              console.log('🔄 Found existing session, joining:', userSession);
+              setSessionId(userSession);
+              setIsMatched(true);
+              setWaiting(false);
+              toast({ title: "Matched!", description: "You've been connected with a stranger" });
+              await setupRealTimeCommunication(userSession, media, false);
+            }
+          } catch (error) {
+            console.error('Error checking session status:', error);
+          }
+        }, 2000); // Check after 2 seconds
       }
     } catch (e: any) {
       toast({ title: "Camera/Mic error", description: e?.message || "Permission needed" });
@@ -125,8 +187,12 @@ const VideoChat = () => {
 
   const setupMatchedListener = (userId: string, media: MediaStream) => {
     // Listen for matched event from WebSocket
+    console.log('Setting up matched event listener for user:', userId);
     socketService.on('matched', (data) => {
-      console.log('Received matched event:', data);
+      console.log('🎯 Received matched event:', data);
+      console.log('Current user ID:', userId);
+      console.log('Matched session ID:', data.session_id);
+      
       setIsMatched(true);
       setWaiting(false);
       setSessionId(data.session_id);

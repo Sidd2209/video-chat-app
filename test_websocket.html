@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+        .status.connected { background: #d4edda; color: #155724; }
+        .status.error { background: #f8d7da; color: #721c24; }
+        .logs {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            padding: 10px;
+            height: 300px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔌 WebSocket Connection Test</h1>
+        <p>Testing the WebSocket connection and user_id event flow</p>
+        
+        <div class="status" id="status">Not connected</div>
+        
+        <div>
+            <button id="connectBtn">Connect to WebSocket</button>
+            <button id="disconnectBtn" disabled>Disconnect</button>
+            <button id="checkStatusBtn">Check Backend Status</button>
+        </div>
+        
+        <h3>Connection Logs</h3>
+        <div class="logs" id="logs"></div>
+    </div>
+
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <script>
+        let socket;
+        let userId;
+
+        const statusEl = document.getElementById('status');
+        const connectBtn = document.getElementById('connectBtn');
+        const disconnectBtn = document.getElementById('disconnectBtn');
+        const checkStatusBtn = document.getElementById('checkStatusBtn');
+        const logsEl = document.getElementById('logs');
+
+        function log(message) {
+            const timestamp = new Date().toLocaleTimeString();
+            logsEl.innerHTML += `[${timestamp}] ${message}\n`;
+            logsEl.scrollTop = logsEl.scrollHeight;
+            console.log(message);
+        }
+
+        function updateStatus(message, type = '') {
+            statusEl.textContent = message;
+            statusEl.className = `status ${type}`;
+        }
+
+        async function connect() {
+            try {
+                updateStatus('Connecting...', '');
+                log('🚀 Starting WebSocket connection...');
+
+                socket = io('http://localhost:8081', {
+                    transports: ['polling', 'websocket'],
+                    timeout: 10000,
+                    autoConnect: false
+                });
+
+                // Set up event listeners BEFORE connecting
+                socket.on('connect', () => {
+                    log('✅ Connected to WebSocket server');
+                    updateStatus('Connected, waiting for user_id...', 'connected');
+                    connectBtn.disabled = true;
+                    disconnectBtn.disabled = false;
+                });
+
+                socket.on('disconnect', () => {
+                    log('❌ Disconnected from WebSocket server');
+                    updateStatus('Disconnected', 'error');
+                    connectBtn.disabled = false;
+                    disconnectBtn.disabled = true;
+                    userId = null;
+                });
+
+                socket.on('user_id', (data) => {
+                    userId = data.user_id;
+                    log(`✅ Received user_id: ${userId}`);
+                    updateStatus(`Connected as ${userId}`, 'connected');
+                });
+
+                socket.on('connect_error', (error) => {
+                    log(`❌ Connection error: ${error.message}`);
+                    updateStatus('Connection failed', 'error');
+                    connectBtn.disabled = false;
+                    disconnectBtn.disabled = true;
+                });
+
+                socket.on('connect_timeout', () => {
+                    log('⏰ Connection timeout');
+                    updateStatus('Connection timeout', 'error');
+                    connectBtn.disabled = false;
+                    disconnectBtn.disabled = true;
+                });
+
+                // Connect
+                log('🔌 Attempting to connect...');
+                socket.connect();
+
+            } catch (error) {
+                log(`❌ Error starting connection: ${error.message}`);
+                updateStatus('Failed to start', 'error');
+            }
+        }
+
+        function disconnect() {
+            if (socket) {
+                log('🔌 Disconnecting...');
+                socket.disconnect();
+                socket = null;
+            }
+        }
+
+        async function checkBackendStatus() {
+            try {
+                log('🔍 Checking backend status...');
+                const response = await fetch('http://localhost:8081');
+                const data = await response.json();
+                log(`📊 Backend status: ${JSON.stringify(data, null, 2)}`);
+            } catch (error) {
+                log(`❌ Error checking backend status: ${error.message}`);
+            }
+        }
+
+        // Event listeners
+        connectBtn.addEventListener('click', connect);
+        disconnectBtn.addEventListener('click', disconnect);
+        checkStatusBtn.addEventListener('click', checkBackendStatus);
+
+        // Initial status check
+        checkBackendStatus();
+    </script>
+</body>
+</html>
