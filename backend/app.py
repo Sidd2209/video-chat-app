@@ -13,6 +13,7 @@ from datetime import datetime
 import logging
 from collections import defaultdict
 import threading
+# requests import not needed for this endpoint
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -35,7 +36,10 @@ socketio = SocketIO(
     allow_upgrades=True,
     transports=['websocket', 'polling'],
     always_connect=True,
-    cookie=None
+    cookie=None,
+    reconnection=True,
+    reconnection_attempts=5,
+    reconnection_delay=1000
 )
 CORS(app, origins="*")
 
@@ -83,8 +87,11 @@ class UserManager:
                 # Get the first user that's not the excluded user
                 for i, user_id in enumerate(self.waiting_rooms[chat_type]):
                     if user_id != exclude_user_id:
-                        return self.waiting_rooms[chat_type].pop(i)
+                        partner = self.waiting_rooms[chat_type].pop(i)
+                        logger.info(f"🔍 Found partner {partner} for {exclude_user_id} (excluded {exclude_user_id})")
+                        return partner
                 # If no other user found, return None
+                logger.info(f"⚠️ No partner found for {exclude_user_id} in {chat_type} waiting room")
                 return None
             return None
     
@@ -366,6 +373,47 @@ def auto_match_all():
         logger.error(f"Error in auto_match_all: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/trigger_auto_match', methods=['POST'])
+def trigger_auto_match():
+    """Manually trigger auto-match for all active users"""
+    try:
+        logger.info("🔧 Manual auto-match trigger requested")
+        
+        # Get all active users who are not in sessions
+        active_users = list(user_manager.active_users)
+        sessioned_users = set(user_manager.user_sessions.keys())
+        available_users = [user for user in active_users if user not in sessioned_users]
+        
+        logger.info(f"📊 Available users for auto-match: {available_users}")
+        
+        matched_count = 0
+        
+        # Process each available user
+        for user_id in available_users:
+            try:
+                logger.info(f"🔍 Processing user {user_id} for auto-match")
+                auto_match_user(user_id)
+                matched_count += 1
+            except Exception as e:
+                logger.error(f"❌ Error processing user {user_id}: {str(e)}")
+        
+        # Check final status by accessing user_manager directly
+        final_status = {
+            'active_users': len(user_manager.active_users),
+            'waiting_video': len(user_manager.waiting_rooms['video']),
+            'active_sessions': len(user_manager.active_sessions)
+        }
+
+        return jsonify({
+            'success': True,
+            'processed_users': matched_count,
+            'available_users': available_users,
+            'final_status': final_status
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in trigger_auto_match: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/start', methods=['POST'])
@@ -426,9 +474,11 @@ def start_text_chat():
 def start_video_chat():
     """Start a video chat session"""
     try:
-        # Get user_id from request headers or query params
-        user_id = request.headers.get('X-User-ID') or request.args.get('user_id')
-        logger.info(f"Received video chat request - Headers: {dict(request.headers)}, Args: {dict(request.args)}, user_id: {user_id}")
+        # Get user_id from request body, headers, or query params (in order of preference)
+        data = request.get_json() or {}
+        user_id = data.get('user_id') or request.headers.get('X-User-ID') or request.args.get('user_id')
+        
+        logger.info(f"Received video chat request - Body: {data}, Headers: {dict(request.headers)}, Args: {dict(request.args)}, user_id: {user_id}")
         
         if not user_id:
             logger.error("No user_id provided in request")
@@ -442,11 +492,24 @@ def start_video_chat():
             logger.error(f"User {user_id} not found in active_users")
             return jsonify({'error': 'User not connected via WebSocket'}), 400
         
+        # Check if user is already in a session
+        existing_session_id = user_manager.get_user_session(user_id)
+        if existing_session_id:
+            logger.info(f"User {user_id} already in session {existing_session_id}")
+            chat_session = user_manager.get_session(existing_session_id)
+            if chat_session:
+                partner_id = chat_session.get_partner_id(user_id)
+                return jsonify({
+                    'session_id': existing_session_id,
+                    'status': 'matched',
+                    'partner_id': partner_id
+                })
+        
         # Check if there's a waiting user
-        partner_id = user_manager.get_waiting_partner('video')
+        partner_id = user_manager.get_waiting_partner('video', exclude_user_id=user_id)
         logger.info(f"Video chat request from {user_id}, waiting users: {user_manager.waiting_rooms['video']}, partner_id: {partner_id}")
         
-        if partner_id:
+        if partner_id and partner_id != user_id:
             # Match with waiting user
             logger.info(f"Creating session between {user_id} and {partner_id}")
             chat_session = user_manager.create_session(user_id, partner_id, 'video')
@@ -479,20 +542,6 @@ def start_video_chat():
             except Exception as e:
                 logger.error(f"❌ Failed to emit matched event to {partner_id}: {str(e)}")
             
-            # Also broadcast to all users as a fallback
-            logger.info("Broadcasting matched event to all users as fallback")
-            try:
-                socketio.emit('matched_broadcast', {
-                    'session_id': chat_session.session_id,
-                    'chat_type': 'video',
-                    'user1_id': user_id,
-                    'user2_id': partner_id,
-                    'timestamp': datetime.now().isoformat()
-                })
-                logger.info("✅ Successfully broadcasted matched event")
-            except Exception as e:
-                logger.error(f"❌ Failed to broadcast matched event: {str(e)}")
-            
             logger.info(f"Video chat matched: {user_id} with {partner_id}, session: {chat_session.session_id}")
             
             return jsonify({
@@ -504,6 +553,7 @@ def start_video_chat():
             # Add to waiting list
             user_manager.add_waiting_user(user_id, 'video')
             logger.info(f"User {user_id} waiting for video chat. Total waiting: {user_manager.get_waiting_count('video')}")
+            logger.info(f"📊 Current waiting room: {user_manager.waiting_rooms['video']}")
             
             return jsonify({
                 'session_id': None,
@@ -619,70 +669,82 @@ def disconnect_chat():
 def handle_connect():
     """Handle client connection"""
     logger.info(f"🎉 CONNECT EVENT TRIGGERED for socket {request.sid}")
+    
+    # Generate user_id immediately
+    user_id = str(uuid.uuid4())
+    logger.info(f"Generated new user_id: {user_id}")
+    
+    # Map socket to user_id
+    user_manager.socket_user_map[request.sid] = user_id
+    logger.info(f"Mapped socket {request.sid} to user {user_id}")
+    
+    # Join user's personal room
     try:
-        # Map early to prevent disconnect warnings
-        user_id = str(uuid.uuid4())
-        logger.info(f"Generated user_id: {user_id}")
-        
-        session['user_id'] = user_id
-        logger.info(f"Set session user_id")
-        
-        user_manager.socket_user_map[request.sid] = user_id  # Map immediately
-        logger.info(f"Mapped socket {request.sid} to user {user_id}")
-        
-        # Join user's personal room
         join_room(user_id)
         logger.info(f"Joined room: {user_id}")
-        
-        # Add to active users (online)
+    except Exception as e:
+        logger.error(f"❌ Error joining room: {str(e)}")
+    
+    # Add to active users
+    try:
         user_manager.add_active_user(user_id)
         logger.info(f"Added to active users")
-        
-        logger.info(f"Client connected: {user_id} (socket: {request.sid})")
-        
-        # Emit the user_id to the client immediately (auto-send approach)
-        logger.info(f"Auto-emitting user_id {user_id} to client {request.sid}")
-        try:
-            # Try direct emit first
-            emit('user_id', {'user_id': user_id})
-            logger.info(f"✅ Successfully auto-emitted user_id to client (direct)")
-        except Exception as e:
-            logger.error(f"❌ Error auto-emitting user_id (direct): {str(e)}")
-            try:
-                # Fallback: emit to room
-                emit('user_id', {'user_id': user_id}, room=request.sid)
-                logger.info(f"✅ Successfully auto-emitted user_id to client (room)")
-            except Exception as e2:
-                logger.error(f"❌ Error auto-emitting user_id (room): {str(e2)}")
-                try:
-                    # Last resort: emit to namespace
-                    emit('user_id', {'user_id': user_id}, namespace='/')
-                    logger.info(f"✅ Successfully auto-emitted user_id to client (namespace)")
-                except Exception as e3:
-                    logger.error(f"❌ Error auto-emitting user_id (namespace): {str(e3)}")
-        
-        # Auto-match with other waiting users (with delay to ensure user_id is sent first)
-        logger.info(f"Starting auto-match for user {user_id}")
-        eventlet.spawn(auto_match_user, user_id)
-        
     except Exception as e:
-        logger.error(f"Error in handle_connect: {str(e)}")
-        # Clean up mapping on error
-        user_manager.socket_user_map.pop(request.sid, None)
-        raise
+        logger.error(f"❌ Error adding to active users: {str(e)}")
+    
+    # CRITICAL: Emit user_id using the most reliable method
+    logger.info(f"📤 Emitting user_id {user_id} to client {request.sid}")
+    
+    # Use socketio.emit with room - this is the most reliable method
+    try:
+        socketio.emit('user_id', {'user_id': user_id}, room=request.sid)
+        logger.info(f"✅ Successfully emitted user_id to client {request.sid}")
+    except Exception as emit_error:
+        logger.error(f"❌ Error emitting user_id: {str(emit_error)}")
+        # Fallback: try direct emit
+        try:
+            emit('user_id', {'user_id': user_id})
+            logger.info(f"✅ Fallback emit successful")
+        except Exception as fallback_error:
+            logger.error(f"❌ Fallback emit also failed: {str(fallback_error)}")
+    
+    # Schedule auto-match
+    try:
+        eventlet.spawn_after(1.0, auto_match_user, user_id)
+        logger.info(f"✅ Auto-match scheduled for user {user_id}")
+    except Exception as e:
+        logger.error(f"❌ Failed to schedule auto-match: {str(e)}")
+        # Call immediately as fallback
+        try:
+            auto_match_user(user_id)
+            logger.info(f"✅ Auto-match called immediately")
+        except Exception as e2:
+            logger.error(f"❌ Auto-match failed: {str(e2)}")
+
+
 
 def auto_match_user(new_user_id):
     """Automatically match a new user with waiting users"""
     try:
         logger.info(f"🔍 Auto-match function called for user {new_user_id}")
         
-        # Add user to waiting room
-        user_manager.add_waiting_user(new_user_id, 'video')
-        logger.info(f"✅ User {new_user_id} added to video waiting room")
+        # Check if user is already in a session
+        if new_user_id in user_manager.user_sessions:
+            logger.info(f"⚠️ User {new_user_id} already in session, skipping auto-match")
+            return
         
-        # Check if there's a waiting partner (excluding self)
+        # Check if user is already in waiting room
+        if new_user_id in user_manager.waiting_rooms['video']:
+            logger.info(f"⚠️ User {new_user_id} already in waiting room, skipping duplicate add")
+        else:
+            # Add user to waiting room
+            user_manager.add_waiting_user(new_user_id, 'video')
+            logger.info(f"✅ User {new_user_id} added to video waiting room")
+        
+        # Check if there's a waiting partner (CRITICAL: exclude self)
         partner_id = user_manager.get_waiting_partner('video', exclude_user_id=new_user_id)
-        logger.info(f"🔍 Looking for partner, found: {partner_id}")
+        logger.info(f"🔍 Looking for partner for {new_user_id}, found: {partner_id}")
+        logger.info(f"📊 Current waiting room: {user_manager.waiting_rooms['video']}")
         
         if partner_id and partner_id != new_user_id:
             logger.info(f"🎯 Auto-matching {new_user_id} with {partner_id}")
@@ -692,24 +754,32 @@ def auto_match_user(new_user_id):
             logger.info(f"✅ Created session {chat_session.session_id}")
             
             # Add delay to ensure both users are ready
-            eventlet.sleep(1.0)
+            eventlet.sleep(0.5)
             
             # Emit matched events
             logger.info(f"📤 Emitting matched event to {new_user_id}")
-            socketio.emit('matched', {
-                'session_id': chat_session.session_id,
-                'chat_type': 'video',
-                'partner_id': partner_id,
-                'is_initiator': False
-            }, room=new_user_id)
+            try:
+                socketio.emit('matched', {
+                    'session_id': chat_session.session_id,
+                    'chat_type': 'video',
+                    'partner_id': partner_id,
+                    'is_initiator': False
+                }, room=new_user_id)
+                logger.info(f"✅ Successfully emitted matched event to {new_user_id}")
+            except Exception as e:
+                logger.error(f"❌ Failed to emit matched event to {new_user_id}: {str(e)}")
             
             logger.info(f"📤 Emitting matched event to {partner_id}")
-            socketio.emit('matched', {
-                'session_id': chat_session.session_id,
-                'chat_type': 'video',
-                'partner_id': new_user_id,
-                'is_initiator': True
-            }, room=partner_id)
+            try:
+                socketio.emit('matched', {
+                    'session_id': chat_session.session_id,
+                    'chat_type': 'video',
+                    'partner_id': new_user_id,
+                    'is_initiator': True
+                }, room=partner_id)
+                logger.info(f"✅ Successfully emitted matched event to {partner_id}")
+            except Exception as e:
+                logger.error(f"❌ Failed to emit matched event to {partner_id}: {str(e)}")
             
             logger.info(f"🎉 Auto-matched {new_user_id} with {partner_id} in session {chat_session.session_id}")
         else:
@@ -724,39 +794,57 @@ def auto_match_user(new_user_id):
 @socketio.on('*')
 def catch_all(event, data=None):
     """Catch all events for debugging"""
-    logger.info(f"🔍 Received event: {event}, data: {data}")
+    logger.info(f"🔍 Received event: {event}, data: {data}, socket: {request.sid}")
+    
+    # Special handling for request_user_id event
+    if event == 'request_user_id':
+        logger.info(f"📞 REQUEST_USER_ID event received via catch_all for socket {request.sid}")
+        handle_request_user_id(data)
+
+# Removed register event handler - auto-matching is now handled in connect event
 
 @socketio.on('request_user_id')
-def handle_request_user_id():
+def handle_request_user_id(data=None):
     """Handle user_id request from client"""
     logger.info(f"📞 REQUEST_USER_ID event triggered for socket {request.sid}")
+    logger.info(f"📊 Current socket mappings: {user_manager.socket_user_map}")
     
     user_id = user_manager.socket_user_map.get(request.sid)
     if user_id:
         logger.info(f"Re-sending user_id {user_id} to client {request.sid}")
         try:
-            emit('user_id', {'user_id': user_id}, room=request.sid, namespace='/')
+            # Try multiple emit methods to ensure delivery
+            emit('user_id', {'user_id': user_id})
             logger.info(f"✅ Successfully re-sent user_id to client {request.sid}")
         except Exception as e:
             logger.error(f"❌ Error re-sending user_id: {str(e)}")
+            try:
+                # Fallback emit methods
+                socketio.emit('user_id', {'user_id': user_id}, room=request.sid)
+                logger.info(f"✅ Successfully re-sent user_id to client {request.sid} (room)")
+            except Exception as e2:
+                logger.error(f"❌ Error re-sending user_id (room): {str(e2)}")
+                try:
+                    # Last resort: emit to namespace
+                    socketio.emit('user_id', {'user_id': user_id}, namespace='/')
+                    logger.info(f"✅ Successfully re-sent user_id to client {request.sid} (namespace)")
+                except Exception as e3:
+                    logger.error(f"❌ Error re-sending user_id (namespace): {str(e3)}")
     else:
-        logger.warning(f"Client {request.sid} requested user_id but not found in mapping")
-        # Generate new user_id if none exists
-        user_id = str(uuid.uuid4())
-        session['user_id'] = user_id
-        join_room(user_id)
-        user_manager.add_active_user(user_id)
-        user_manager.socket_user_map[request.sid] = user_id
-        logger.info(f"Generated new user_id {user_id} for client {request.sid}")
+        logger.error(f"❌ No user_id found for socket {request.sid}")
+        logger.error(f"📊 Available socket mappings: {user_manager.socket_user_map}")
+        # Try to generate a new user_id
         try:
-            emit('user_id', {'user_id': user_id}, room=request.sid, namespace='/')
+            new_user_id = str(uuid.uuid4())
+            user_manager.socket_user_map[request.sid] = new_user_id
+            session['user_id'] = new_user_id
+            user_manager.add_active_user(new_user_id)
+            join_room(new_user_id)
+            logger.info(f"🆕 Generated new user_id {new_user_id} for socket {request.sid}")
+            emit('user_id', {'user_id': new_user_id})
             logger.info(f"✅ Successfully sent new user_id to client {request.sid}")
         except Exception as e:
-            logger.error(f"❌ Error sending new user_id: {str(e)}")
-        
-        # Also trigger auto-match for this user
-        logger.info(f"Triggering auto-match for newly created user {user_id}")
-        eventlet.spawn(auto_match_user, user_id)
+            logger.error(f"❌ Error generating new user_id: {str(e)}")
 
 @socketio.on('disconnect')
 def handle_disconnect():
@@ -854,6 +942,66 @@ def handle_user_typing(data):
                 'session_id': session_id,
                 'is_typing': is_typing
             }, room=partner_id)
+
+@app.route('/debug_socket/<socket_id>')
+def debug_socket(socket_id):
+    """Debug endpoint to check socket status"""
+    user_id = user_manager.socket_user_map.get(socket_id)
+    return jsonify({
+        'socket_id': socket_id,
+        'user_id': user_id,
+        'is_active': user_id in user_manager.active_users if user_id else False,
+        'in_session': user_id in user_manager.user_sessions if user_id else False,
+        'session_id': user_manager.user_sessions.get(user_id) if user_id else None
+    })
+
+@app.route('/manual_emit_user_id/<socket_id>', methods=['POST'])
+def manual_emit_user_id(socket_id):
+    """Manually emit user_id to a specific socket for testing"""
+    try:
+        user_id = user_manager.socket_user_map.get(socket_id)
+        if user_id:
+            logger.info(f"🔧 Manual emit request for socket {socket_id}, user_id: {user_id}")
+            
+            # Try multiple emit methods
+            success = False
+            
+            # Method 1: socketio.emit to room
+            try:
+                socketio.emit('user_id', {'user_id': user_id}, room=socket_id)
+                logger.info(f"✅ Manual emit successful (room method)")
+                success = True
+            except Exception as e:
+                logger.error(f"❌ Manual emit failed (room): {str(e)}")
+            
+            # Method 2: socketio.emit to namespace
+            if not success:
+                try:
+                    socketio.emit('user_id', {'user_id': user_id}, namespace='/')
+                    logger.info(f"✅ Manual emit successful (namespace)")
+                    success = True
+                except Exception as e:
+                    logger.error(f"❌ Manual emit failed (namespace): {str(e)}")
+            
+            if success:
+                return jsonify({
+                    'success': True,
+                    'message': f'User ID {user_id} emitted to socket {socket_id}',
+                    'user_id': user_id
+                })
+            else:
+                return jsonify({
+                    'success': False,
+                    'error': 'All emit methods failed'
+                }), 500
+        else:
+            return jsonify({
+                'success': False,
+                'error': f'No user_id found for socket {socket_id}'
+            }), 404
+    except Exception as e:
+        logger.error(f"Error in manual_emit_user_id: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     logger.info("Starting Video Chat Backend...")

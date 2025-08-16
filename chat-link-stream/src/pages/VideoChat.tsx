@@ -20,167 +20,297 @@ const VideoChat = () => {
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  
+  // CRITICAL: Use refs to prevent cleanup on every render
+  const isInitializedRef = useRef(false);
+  const isConnectedRef = useRef(false);
+  const cleanupRef = useRef(false);
 
   useEffect(() => {
+    // Prevent multiple initializations
+    if (isInitializedRef.current) {
+      console.log('⚠️ Component already initialized, skipping...');
+      return;
+    }
+    
+    isInitializedRef.current = true;
     document.title = "Video Chat — Chat with a Stranger";
     
-    // Set up global matched event listener
+    // Clear any existing user_id from localStorage to prevent conflicts
+    localStorage.removeItem('user_id');
+    console.log('🧹 Cleared localStorage user_id to prevent conflicts');
+    
     const handleMatched = (data: any) => {
-      console.log('🌍 Global matched event received:', data);
-      if (userId && !isMatched) {
-        console.log('Processing global matched event for user:', userId);
-        setIsMatched(true);
-        setWaiting(false);
-        setSessionId(data.session_id);
-        toast({ title: "Matched!", description: "You've been connected with a stranger" });
-        if (streamRef.current) {
-          setupRealTimeCommunication(data.session_id, streamRef.current, data.is_initiator);
-        }
-      }
+      console.log('🎯 Received matched event:', data);
+      setSessionId(data.session_id);
+      setIsMatched(true);
+      setWaiting(false);
+      isConnectedRef.current = true;
+      toast({ title: "Matched!", description: "You've been connected with a stranger" });
     };
-    
-    socketService.on('matched', handleMatched);
-    
-    // Also listen for broadcast matched events
-    const handleMatchedBroadcast = (data: any) => {
-      console.log('🌍 Global matched_broadcast event received:', data);
-      if (userId && !isMatched) {
-        // Check if this user is involved in the match
-        if (data.user1_id === userId || data.user2_id === userId) {
-          console.log('Processing broadcast matched event for user:', userId);
-          const isInitiator = data.user1_id === userId; // user1 is the initiator
-          setIsMatched(true);
-          setWaiting(false);
-          setSessionId(data.session_id);
-          toast({ title: "Matched!", description: "You've been connected with a stranger" });
-          if (streamRef.current) {
-            setupRealTimeCommunication(data.session_id, streamRef.current, isInitiator);
-          }
-        }
-      }
-    };
-    
-    socketService.on('matched_broadcast', handleMatchedBroadcast);
-    
-    // Cleanup
-    return () => {
-      socketService.off('matched', handleMatched);
-      socketService.off('matched_broadcast', handleMatchedBroadcast);
-    };
-  }, [userId, isMatched]);
 
-  const start = async () => {
+    const handlePartnerDisconnected = (data: any) => {
+      console.log('👋 Partner disconnected:', data);
+      setIsMatched(false);
+      setSessionId(null);
+      isConnectedRef.current = false;
+      toast({ title: "Partner disconnected", description: "Your chat partner has left the session." });
+    };
+
+    const handleSessionEnded = (data: any) => {
+      console.log('🔚 Session ended:', data);
+      setIsMatched(false);
+      setSessionId(null);
+      isConnectedRef.current = false;
+      toast({ title: "Session ended", description: "The chat session has ended." });
+    };
+
+    // Register event listeners (only once)
+    socketService.onMatched(handleMatched);
+    socketService.on('partner_disconnected', handlePartnerDisconnected);
+    socketService.on('session_ended', handleSessionEnded);
+
+    // Cleanup function - ONLY on component unmount
+    return () => {
+      if (cleanupRef.current) return; // Prevent multiple cleanups
+      cleanupRef.current = true;
+      
+      console.log('🧹 Component unmounting - performing cleanup...');
+      socketService.offMatched(handleMatched);
+      socketService.off('partner_disconnected', handlePartnerDisconnected);
+      socketService.off('session_ended', handleSessionEnded);
+      
+      // Cleanup: clear localStorage when component unmounts
+      localStorage.removeItem('user_id');
+      console.log('🧹 Cleanup: cleared localStorage user_id');
+    };
+  }, []); // Empty dependency array to prevent re-registration
+
+  // Separate useEffect for connection initialization
+  useEffect(() => {
+    // Only initialize if not already connected and not already initialized
+    if (isConnectedRef.current || isInitializedRef.current) {
+      return;
+    }
+
+    // Don't auto-initialize - wait for user to click button
+    console.log('🚀 Component mounted, waiting for user to click Start Video Chat...');
+  }, []); // Empty dependency array to prevent re-registration
+
+  // CRITICAL: Add useEffect for remote stream handling
+  useEffect(() => {
+    const handleRemoteStream = (event: CustomEvent) => {
+      console.log('🎥 Remote stream received in VideoChat component:', event.detail);
+      if (remoteVideoRef.current && event.detail) {
+        remoteVideoRef.current.srcObject = event.detail;
+        console.log('✅ Remote video element updated with stream');
+      }
+    };
+
+    // Listen for remote stream events
+    window.addEventListener('remoteStream', handleRemoteStream as EventListener);
+
+    return () => {
+      window.removeEventListener('remoteStream', handleRemoteStream as EventListener);
+    };
+  }, []); // Empty dependency array
+
+  // Manual start function for the button
+  const startVideoChatManual = async () => {
+    if (isConnectedRef.current || isInitializedRef.current) {
+      console.log('⚠️ Already connected or initializing, skipping...');
+      return;
+    }
+
     try {
       setConnecting(true);
+      console.log('🚀 Starting video chat manually...');
       
-      // Set up user_id listener BEFORE connecting to avoid race condition
-      console.log('Setting up user_id listener before connection...');
-      const userId = await new Promise<string>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          console.error('Timeout waiting for user_id');
-          reject(new Error('Timeout waiting for user_id'));
-        }, 10000); // Increase to 10 seconds to allow handshake/upgrade
-        
-        let userIdReceived = false;
-        
-        const handleUserId = (userId: string) => {
-          if (userIdReceived) return;
-          console.log('VideoChat received user_id:', userId);
-          userIdReceived = true;
-          clearTimeout(timeout);
-          socketService.offUserId(handleUserId);
-          setUserId(userId);
-          resolve(userId);
-        };
-        
-        // Register listener BEFORE connecting
-        socketService.onUserId(handleUserId);
-        
-        // Now connect to WebSocket
-        console.log('Connecting to WebSocket...');
-        socketService.connect().then(() => {
-          console.log('WebSocket connected, waiting for user_id...');
-          
-          // Fallback: If user_id is not received within 3 seconds, request it
-          setTimeout(() => {
-            if (!userIdReceived) {
-              console.log('🔄 Fallback: Requesting user_id manually...');
-              console.log('🔍 Socket status before fallback:', socketService.isSocketConnected);
-              socketService.emit('request_user_id', {});
+      // CRITICAL: Set up user_id listener BEFORE connecting to WebSocket
+      console.log('Setting up user_id listener BEFORE connecting...');
+      let userIdReceived = false;
+      let userId: string | null = null;
+      
+      const handleUserId = (receivedUserId: string) => {
+        if (userIdReceived) return;
+        console.log('VideoChat received user_id:', receivedUserId);
+        userIdReceived = true;
+        userId = receivedUserId;
+        setUserId(receivedUserId);
+      };
+      
+      // Register listener BEFORE connecting
+      socketService.onUserId(handleUserId);
+      
+      // Connect to WebSocket AFTER setting up listener
+      console.log('Connecting to WebSocket...');
+      await socketService.connect();
+      console.log('WebSocket connected successfully');
+
+      // CRITICAL: Request user_id manually if not received within 2 seconds
+      setTimeout(async () => {
+        if (!userIdReceived) {
+          console.log('🔄 Requesting user_id manually...');
+          try {
+            // Request user_id from server
+            socketService.emit('request_user_id');
+            
+            // Also try to get it via API
+            const response = await fetch('http://localhost:8081/start_video', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ user_id: 'temp' })
+            });
+            
+            if (response.ok) {
+              const data = await response.json();
+              console.log('API response:', data);
             }
-          }, 3000);
-        }).catch((error) => {
-          console.error('WebSocket connection failed:', error);
-          reject(error);
-        });
-      });
+          } catch (e) {
+            console.error('Error requesting user_id:', e);
+          }
+        }
+      }, 2000);
+      
+      // Wait for user_id with timeout
+      const timeout = setTimeout(() => {
+        if (!userIdReceived) {
+          console.error('Timeout waiting for user_id');
+          throw new Error('Timeout waiting for user_id');
+        }
+      }, 10000); // 10 second timeout
+      
+      // Wait for user_id to be received
+      while (!userIdReceived) {
+        await new Promise(resolve => setTimeout(resolve, 100)); // Wait 100ms
+      }
+      
+      clearTimeout(timeout);
+      socketService.offUserId(handleUserId);
+      
+      if (!userId) {
+        throw new Error('Failed to receive user_id');
+      }
+      
+      // CRITICAL: Add delay to ensure server has fully registered the user
+      console.log('⏳ Waiting 2 seconds for server to fully register user...');
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      console.log('✅ Server registration delay completed');
       
       await setupVideoChat(userId);
-    } catch (e: any) {
-      console.error('Error in start:', e);
-      toast({ title: "Connection error", description: e?.message || "Failed to connect" });
-    } finally {
       setConnecting(false);
+    } catch (error) {
+      console.error('Error in startVideoChatManual:', error);
+      setConnecting(false);
+      toast({ title: "Connection error", description: error?.message || "Failed to connect" });
     }
   };
 
   const setupVideoChat = async (userId: string) => {
     try {
       // Get user media
-      const media = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true,
-      });
+      console.log('🎥 Requesting camera/microphone permissions...');
+      
+      // Enhanced constraints for better localhost compatibility
+      const constraints = {
+        video: {
+          width: { ideal: 1280, min: 640 },
+          height: { ideal: 720, min: 480 },
+          frameRate: { ideal: 30, min: 15 },
+          facingMode: 'user'
+        },
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: { ideal: 48000 },
+          channelCount: { ideal: 2 }
+        }
+      };
+      
+      const media = await navigator.mediaDevices.getUserMedia(constraints);
+      console.log('✅ Camera/microphone access granted');
+      console.log('📹 Stream tracks:', media.getTracks().map(t => `${t.kind}: ${t.enabled}`));
       
       streamRef.current = media;
       
-      // Display local video
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = media;
         await localVideoRef.current.play().catch(() => {});
       }
       
-      // Set up matched event listener BEFORE making the API call
       setupMatchedListener(userId, media);
       
-      // Start video chat session
       console.log('Making API call to start video chat with userId:', userId);
-      const response = await startVideoChat(userId);
-      console.log('Video chat response:', response);
+      
+      // Add retry mechanism for API call
+      let retryCount = 0;
+      const maxRetries = 3;
+      let response;
+      
+      while (retryCount < maxRetries) {
+        try {
+          response = await startVideoChat(userId);
+          console.log('✅ Video chat API success:', response);
+          break; // Success, exit retry loop
+        } catch (apiError: any) {
+          retryCount++;
+          console.error(`❌ startVideoChat API failed (attempt ${retryCount}/${maxRetries}):`, apiError);
+          
+          // Check if it's a "User not connected" error
+          if (apiError.message.includes('User not connected via WebSocket')) {
+            if (retryCount < maxRetries) {
+              console.log(`⏳ User not connected, waiting 1 second before retry ${retryCount + 1}...`);
+              await new Promise(resolve => setTimeout(resolve, 1000));
+              continue; // Retry
+            } else {
+              console.error('❌ Max retries reached for "User not connected" error');
+              toast({ 
+                title: "Connection Error", 
+                description: "Failed to connect to video chat server after multiple attempts" 
+              });
+              return;
+            }
+          } else {
+            // For other errors, don't retry
+            console.error('❌ Non-retryable API error:', apiError);
+            toast({ 
+              title: "Connection Error", 
+              description: apiError.message || "Failed to start video chat" 
+            });
+            return;
+          }
+        }
+      }
+      
+      // Validate response structure
+      if (!response || !response.hasOwnProperty('status')) {
+        throw new Error('Invalid API response structure');
+      }
+      
       const { session_id, status } = response;
       
       if (status === 'matched') {
+        console.log('🎯 User already matched, setting up session:', session_id);
         setSessionId(session_id);
         setIsMatched(true);
         setWaiting(false);
         toast({ title: "Matched!", description: "You've been connected with a stranger" });
-        await setupRealTimeCommunication(session_id, media, false); // User who just joined is not initiator
-      } else {
-        setWaiting(true);
-        setSessionId(null);
-        toast({ title: "Connected", description: "Waiting for a partner..." });
         
-        // Check if we're already in a session (fallback for missed events)
-        setTimeout(async () => {
-          try {
-            const statusResponse = await fetch('http://localhost:8081');
-            const statusData = await statusResponse.json();
-            const userSession = statusData.debug_info.user_sessions[userId];
-            
-            if (userSession && !isMatched) {
-              console.log('🔄 Found existing session, joining:', userSession);
-              setSessionId(userSession);
-              setIsMatched(true);
-              setWaiting(false);
-              toast({ title: "Matched!", description: "You've been connected with a stranger" });
-              await setupRealTimeCommunication(userSession, media, false);
-            }
-          } catch (error) {
-            console.error('Error checking session status:', error);
-          }
-        }, 2000); // Check after 2 seconds
+        // Set up real-time communication for existing session
+        if (streamRef.current) {
+          setupRealTimeCommunication(session_id, streamRef.current, false);
+        }
+      } else {
+        console.log('⏳ User added to waiting room, session:', session_id);
+        setSessionId(session_id);
+        setWaiting(true);
+        setIsMatched(false);
+        toast({ title: "Connected", description: "Waiting for a partner..." });
       }
+      
     } catch (e: any) {
+      console.error('❌ Camera/Mic error:', e);
       toast({ title: "Camera/Mic error", description: e?.message || "Permission needed" });
     }
   };
@@ -206,7 +336,7 @@ const VideoChat = () => {
       await webrtcService.initialize(sessionId, isInitiator);
       await webrtcService.setLocalStream(media);
       
-      socketService.joinSession(sessionId);
+      socketService.emit('join_session', { session_id: sessionId });
       
       // Only create offer if this user is the initiator
       if (isInitiator) {
@@ -221,12 +351,12 @@ const VideoChat = () => {
         }
       });
       
-      window.addEventListener('remoteStream', (event: any) => {
-        if (remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = event.detail;
-          remoteVideoRef.current.play().catch(() => {});
-        }
-      });
+      // window.addEventListener('remoteStream', (event: any) => {
+      //   if (remoteVideoRef.current) {
+      //     remoteVideoRef.current.srcObject = event.detail;
+      //     remoteVideoRef.current.play().catch(() => {});
+      //   }
+      // });
       
     } catch (error) {
       console.error('Error setting up real-time communication:', error);
@@ -242,7 +372,7 @@ const VideoChat = () => {
     
     if (sessionId) {
       webrtcService.cleanup();
-      socketService.leaveSession(sessionId);
+      socketService.emit('leave_session', { session_id: sessionId });
     }
     
     socketService.disconnect();
@@ -321,7 +451,7 @@ const VideoChat = () => {
       {/* Controls */}
       <div className="bg-gray-800 p-4 flex justify-center gap-4">
         {!connecting && !waiting && !isMatched && (
-          <Button onClick={start} size="lg" className="bg-green-600 hover:bg-green-700">
+          <Button size="lg" className="bg-green-600 hover:bg-green-700" onClick={startVideoChatManual}>
             Start Video Chat
           </Button>
         )}
